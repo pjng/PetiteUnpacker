@@ -364,7 +364,7 @@ def unpack_pd(pd: PackData) -> bytearray:
 
     return out[:out_ptr]
 
-def populate_pe(original_pe: lief.PE.Binary, frags: list[FragmentData]) -> lief.PE.Binary:
+def populate_pe(original_pe: lief.PE.Binary, frags: list[FragmentData], noted_replacement_byte: int) -> lief.PE.Binary:
 
     def memprot2char(mem_prot: int) -> int:
         """To convert between windows VirtualProtect-style page protection constants and section characteristics, more or less"""
@@ -425,7 +425,7 @@ def populate_pe(original_pe: lief.PE.Binary, frags: list[FragmentData]) -> lief.
 
         # Do fixes here I guess
         if frag.vp_size & 0x01:
-            print ("Section is code, resolving relative CALLs/JCCs/JMPs...")
+            print (f"Section is code, resolving relative CALLs/JCCs/JMPs (notice byte: {noted_replacement_byte:#x})...")
 
             size = frag.size_after_unpacking - 6
             ptr  = 0
@@ -438,9 +438,13 @@ def populate_pe(original_pe: lief.PE.Binary, frags: list[FragmentData]) -> lief.
                 # Check if the current instruction is a CALL, JMP or JCC NEAR
                 # TODO: Okay this is getting kinda silly, one sample compared against values starting with 0x14, then the other one by 0x0A. I guess we could make this more general
                 #       with a pattern like ??E8 (well - that's just E8 really), but so far I'm working with just two samples and am not interested in more at the moment, so yeah
-                if (ins_bytes & 0xFFFF) == 0x14E8 or (ins_bytes & 0xFFFF) == 0x14E9 or (ins_bytes & 0xFFF0FF) == 0x14800F or (ins_bytes & 0xFFFF) == 0x0AE8 or (ins_bytes & 0xFFFF) == 0x0AE9 or (ins_bytes & 0xFFF0FF) == 0x0A800F:
 
-                    if (ins_bytes & 0xFFF0FF) == 0x14800F or (ins_bytes & 0xFFF0FF) == 0x0A800F:
+                
+                # Funny bug I caught after testing the output DLL, some PEs use say, 0x14 for the value, some 0x0A, I guess it could be anything, but it's only that, anything else is not intended to happen,
+                # so originally it ended up patching stuff that was not supposed to be patched
+                if (ins_bytes & 0xFFFF) == ((noted_replacement_byte << 8) + 0xE8) or (ins_bytes & 0xFFFF) == ((noted_replacement_byte << 8) + 0xE9) or (ins_bytes & 0xFFF0FF) == ((noted_replacement_byte << 16) + 0x800F):
+
+                    if (ins_bytes & 0xFFF0FF) == ((noted_replacement_byte << 16) + 0x800F):
                         ptr += 1
 
                     # endianness sorcery, it actually makes sense somehow
@@ -968,7 +972,7 @@ def main():
 
     print ("Extracted fragment data, rebuilding PE...")
 
-    new_pe = populate_pe(pe, frags)
+    new_pe = populate_pe(pe, frags, unpack('B', loader[0xA3:0xA4])[0])
 
     # Fix general data dir stuff
     new_pe = fix_data_dirs(pe, new_pe, frags, args.exports, args.resources)
@@ -984,7 +988,6 @@ def main():
 
     print (f"Setting EP to OEP: {oep_rva:#x}")
     new_pe.optional_header.addressof_entrypoint = oep_rva
-
 
     if args.relocs:
         new_pe = fix_relocations(pe, new_pe, frags)
